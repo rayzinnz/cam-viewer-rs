@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use iced::widget::{self, Column, Text};
-use iced::{executor, Element, Sandbox, Settings, Theme, window};
+use iced::{executor, Element, Application, Settings, Theme, window};
 
 const RTSP_URL: &str = "rtsp://admin:your_password@192.168.1.34:554/user=admin_password=v4HXkn4qbU_channel=1_stream=0a&protocol=unicast.sdp?real_stream";
 
@@ -21,7 +21,7 @@ enum Message {
     Tick,
 }
 
-impl Sandbox for CamViewer {
+impl Application for CamViewer {
     type Message = Message;
     type Theme = Theme;
     type Executor = executor::Default;
@@ -48,7 +48,7 @@ impl Sandbox for CamViewer {
         "RTSP Camera Viewer".to_string()
     }
 
-    fn update(&mut self, message: Message) -> iced::Command<Message> {
+    fn update(&mut self, message: Message) -> iced::Task<Message> {
         match message {
             Message::Tick => {
                 let state = frame_state();
@@ -59,7 +59,7 @@ impl Sandbox for CamViewer {
                         self.status = "Streaming".to_string();
                     }
                 }
-                iced::Command::none()
+                iced::Task::none()
             }
         }
     }
@@ -127,7 +127,7 @@ fn run_gstreamer(state: Arc<Mutex<Option<Vec<u8>>>>) {
 
     loop {
         match sink.pull_sample() {
-            gstreamer_app::FlowSuccess::Ok(sample) => {
+            gstreamer::FlowSuccess::Ok(sample) => {
                 if let Some(buffer) = sample.buffer() {
                     if let Some(map_info) = buffer.map_readable() {
                         let width = 640u32;
@@ -136,7 +136,7 @@ fn run_gstreamer(state: Arc<Mutex<Option<Vec<u8>>>>) {
 
                         let mut png_bytes = Vec::new();
                         let mut encoder =
-                            image::codecs::PngEncoder::new(&mut png_bytes);
+                            image::codecs::png::PngEncoder::new(&mut png_bytes);
                         if encoder
                             .encode(data, width, height, image::ColorType::Rgba8)
                             .is_ok()
@@ -148,7 +148,7 @@ fn run_gstreamer(state: Arc<Mutex<Option<Vec<u8>>>>) {
                     }
                 }
             }
-            gstreamer_app::FlowSuccess::Eos => break,
+            gstreamer::FlowSuccess::Eos => break,
             _ => {
                 std::thread::sleep(Duration::from_millis(100));
             }
