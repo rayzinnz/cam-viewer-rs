@@ -1,19 +1,23 @@
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+// use std::time::Duration;
 
-use iced::widget::{self, Column, Text};
-use iced::{executor, Element, Application, Settings, Theme, window};
+use glib::object::Cast;
+use gstreamer::prelude::{ElementExt, GstBinExt};
+use iced::widget::{Column, Text};
+use iced::{Element, Subscription};
+use iced::time::{self, Duration};
+use image::ImageEncoder;
 
 const RTSP_URL: &str = "rtsp://admin:your_password@192.168.1.34:554/user=admin_password=v4HXkn4qbU_channel=1_stream=0a&protocol=unicast.sdp?real_stream";
 
-static FRAME_STATE: OnceLock<Arc<Mutex<Option<Vec<u8>>>>> = OnceLock::new();
+static FRAME_STATE: OnceLock<Arc<Mutex<Option<String>>>> = OnceLock::new();
 
-fn frame_state() -> &'static Arc<Mutex<Option<Vec<u8>>>> {
+fn frame_state() -> &'static Arc<Mutex<Option<String>>> {
     FRAME_STATE.get_or_init(|| Arc::new(Mutex::new(None)))
 }
 
 struct CamViewer {
-    image: Option<iced::image::Handle>,
+    image_path: Option<String>,
     status: String,
 }
 
@@ -21,29 +25,16 @@ enum Message {
     Tick,
 }
 
-impl Application for CamViewer {
-    type Message = Message;
-    type Theme = Theme;
-    type Executor = executor::Default;
-    type Renderer = iced::Renderer;
-    type Cache = ();
-
-    fn new(_cache: ()) -> (Self, Settings<Message>) {
-        (
-            Self {
-                image: None,
-                status: "Connecting to camera...".to_string(),
-            },
-            Settings {
-                window: window::Settings {
-                    size: iced::Size::new(1280.0, 720.0),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        )
+impl Default for CamViewer {
+    fn default() -> Self {
+        Self {
+            image_path: None,
+            status: "Connecting to camera...".to_string(),
+        }
     }
+}
 
+impl CamViewer {
     fn title(&self) -> String {
         "RTSP Camera Viewer".to_string()
     }
@@ -53,9 +44,8 @@ impl Application for CamViewer {
             Message::Tick => {
                 let state = frame_state();
                 if let Ok(guard) = state.lock() {
-                    if let Some(ref png_bytes) = *guard {
-                        self.image =
-                            Some(iced::image::Handle::from_bytes(png_bytes.clone()));
+                    if let Some(ref path) = *guard {
+                        self.image_path = Some(path.clone());
                         self.status = "Streaming".to_string();
                     }
                 }
@@ -64,9 +54,9 @@ impl Application for CamViewer {
         }
     }
 
-    fn view(&self) -> Element<Message> {
-        let content: Element<Message> = if let Some(ref img) = self.image {
-            widget::image(img.clone()).into()
+    fn view(&self) -> Element<'_, Message> {
+        let content: Element<'_, Message> = if let Some(ref path) = self.image_path {
+            iced::widget::image(path).into()
         } else {
             Text::new(&self.status).into()
         };
@@ -76,12 +66,13 @@ impl Application for CamViewer {
             .into()
     }
 
-    fn subscription(&self) -> iced::Subscription<Message> {
-        iced::time::every(Duration::from_millis(33)).map(|_| Message::Tick)
+    fn subscription(&self) -> Subscription<Message> {
+        time::every(Duration::from_millis(33))
+            .map(|_| Message::Tick)
     }
 }
 
-fn run_gstreamer(state: Arc<Mutex<Option<Vec<u8>>>>) {
+fn run_gstreamer(state: Arc<Mutex<Option<String>>>) {
     if let Err(e) = gstreamer::init() {
         eprintln!("Failed to initialize GStreamer: {}", e);
         return;
@@ -98,7 +89,7 @@ fn run_gstreamer(state: Arc<Mutex<Option<Vec<u8>>>>) {
         RTSP_URL
     );
 
-    let pipeline = match gstreamer::parse_launch(&pipeline_desc) {
+    let pipeline = match gstreamer::parse::launch(&pipeline_desc) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Failed to create pipeline: {}", e);
@@ -106,16 +97,22 @@ fn run_gstreamer(state: Arc<Mutex<Option<Vec<u8>>>>) {
         }
     };
 
-    let sink = match pipeline.by_name("sink") {
-        Some(s) => match s.downcast::<gstreamer_app::AppSink>() {
-            Ok(s) => s,
-            Err(_) => {
-                eprintln!("Failed to downcast to AppSink");
+    let sink = match pipeline.dynamic_cast_ref::<gstreamer::Bin>() {
+        Some(bin) => match bin.by_name("sink") {
+            Some(s) => match s.downcast::<gstreamer_app::AppSink>() {
+                Ok(s) => s,
+                Err(_) => {
+                    eprintln!("Failed to downcast to AppSink");
+                    return;
+                }
+            },
+            None => {
+                eprintln!("Failed to find appsink in pipeline");
                 return;
             }
-        },
+        }
         None => {
-            eprintln!("Failed to find appsink in pipeline");
+            eprintln!("Failed to dynamic_cast_ref pipline to bin");
             return;
         }
     };
@@ -125,45 +122,48 @@ fn run_gstreamer(state: Arc<Mutex<Option<Vec<u8>>>>) {
         return;
     }
 
-    loop {
-        match sink.pull_sample() {
-            gstreamer::FlowSuccess::Ok(sample) => {
-                if let Some(buffer) = sample.buffer() {
-                    if let Some(map_info) = buffer.map_readable() {
-                        let width = 640u32;
-                        let height = 480u32;
-                        let data = map_info.data();
+    let frame_path = std::env::temp_dir().join("cam_viewer_frame.png");
+    let frame_path_str = frame_path.to_string_lossy().to_string();
 
-                        let mut png_bytes = Vec::new();
-                        let mut encoder =
-                            image::codecs::png::PngEncoder::new(&mut png_bytes);
-                        if encoder
-                            .encode(data, width, height, image::ColorType::Rgba8)
-                            .is_ok()
-                        {
-                            if let Ok(mut guard) = state.lock() {
-                                *guard = Some(png_bytes);
-                            }
+    loop {
+        if let Ok(sample) = sink.pull_sample() {
+            if let Some(buffer) = sample.buffer() {
+                if let Ok(map_info) = buffer.map_readable() {
+                    let width = 640u32;
+                    let height = 480u32;
+                    let data = map_info.as_slice();
+
+                    let mut png_bytes = Vec::new();
+                    let encoder =
+                        image::codecs::png::PngEncoder::new(&mut png_bytes);
+                    if encoder
+                        .write_image(data, width, height, image::ColorType::Rgba8.into())
+                        .is_ok()
+                    {
+                        let _ = std::fs::write(&frame_path, &png_bytes);
+                        if let Ok(mut guard) = state.lock() {
+                            *guard = Some(frame_path_str.clone());
                         }
                     }
                 }
             }
-            gstreamer::FlowSuccess::Eos => break,
-            _ => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
+        } else {
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 
-    let _ = pipeline.set_state(gstreamer::State::Null);
+    // let _ = pipeline.set_state(gstreamer::State::Null);
 }
 
-fn main() {
+fn main() -> iced::Result {
     let state = frame_state().clone();
 
     std::thread::spawn(move || {
         run_gstreamer(state);
     });
 
-    CamViewer::run();
+    iced::application(CamViewer::default, CamViewer::update, CamViewer::view)
+        .title(CamViewer::title)
+        .subscription(CamViewer::subscription)
+        .run()
 }
