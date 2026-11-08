@@ -9,7 +9,7 @@ chrono = "0.4"
 dvrip-rs = { git = "https://github.com/josuku/dvrip-rs.git" }
 helper_lib = { git = "https://github.com/rayzinnz/rust-helper-lib.git", features = ["log"] }
 hhmmss = "0.1"
-iced = { version = "0.14" , features = ["tokio", "lazy"] }
+iced = { version = "0.14" , features = ["tokio"] }
 iced_video_player = "0.6"
 log = "0.x"
 tokio = { version = "1", features = ["full"] }

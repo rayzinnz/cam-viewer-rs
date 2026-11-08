@@ -13,6 +13,7 @@ pub struct CameraInfo {
 	pub ip: String,
 	pub title: String,
 	pub time: DateTime<Local>,
+	pub has_ptz: bool,
 }
 
 pub async fn get_camera_info(ip: &str) -> Result<CameraInfo> {
@@ -45,6 +46,20 @@ pub async fn get_camera_info(ip: &str) -> Result<CameraInfo> {
 		bail!("SerialNo not found for cam {ip}")
 	}
 
+	let mut has_ptz = false;
+	let capabilities = cam.get_system_capabilities().await?;
+	if let Some(other_function) = capabilities.get("OtherFunction") {
+		if let Some(other_functions) = other_function.as_object() {
+			// println!("{:?}", other_functions);
+			for ofn in other_functions {
+				if ofn.0.starts_with("SupportPTZ") {
+					has_ptz = true;
+					break;
+				}
+			}
+		}
+	}
+
 	let title: String;
 	if let Ok(title_ok) = cam.get_channel_titles().await {
 		title = title_ok.first().unwrap_or(&String::new()).to_string();
@@ -60,7 +75,7 @@ pub async fn get_camera_info(ip: &str) -> Result<CameraInfo> {
 	let _ = cam.logout().await;
 	let _ = cam.close().await;
 
-	Ok(CameraInfo { serial_no: serial_no, ip: ip.to_string(), title: title, time: time })
+	Ok(CameraInfo { serial_no: serial_no, ip: ip.to_string(), title: title, time: time, has_ptz: has_ptz })
 }
 
 pub async fn sync_camera_time(ip: &str) -> Result<()> {

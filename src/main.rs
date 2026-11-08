@@ -1,14 +1,12 @@
-use std::ops::Deref;
 use std::sync::Arc;
 
 use hhmmss::Hhmmss;
 use iced::time::{self, Duration, Instant, seconds};
-use iced::widget::{Container, Lazy, Space, column, container, lazy, row, text};
-use iced::{Renderer, Theme, window};
+use iced::widget::{Container, column, container, row, text};
+use iced::window;
 use iced::{Element, Length, Subscription, Task};
 use iced_video_player::{Video, VideoPlayer};
 use log::*;
-use tokio::runtime::Runtime;
 use url::Url;
 
 use crate::camera::{CameraInfo, get_camera_info, sync_camera_time};
@@ -56,11 +54,6 @@ struct CamViewer {
     last_redraw_requested: Instant,
 }
 
-struct CamCheck {
-    serial_no: String,
-    has_video: bool,
-}
-
 #[derive(Debug, Clone)]
 enum Message {
     Tick(()),
@@ -69,7 +62,6 @@ enum Message {
     RedrawRequested(Instant),
     GotCameraInfo(Vec<CameraInfo>),
     CameraConnected(VideoInfo),
-    // CamerasConnected(Vec<VideoInfo>),
 }
 
 impl Default for CamViewer {
@@ -154,10 +146,6 @@ impl CamViewer {
                     }
                 }
                 //check for cameras
-                let serial_nos: Vec<_> = self.video_infos.iter().map(|vi| 
-                        CamCheck { serial_no: vi.serial_no.to_string(), has_video: vi.video.is_some() }
-                    ).collect();
-                // Task::perform(get_video_streams(serial_nos), Message::CamerasConnected)
                 Task::perform(get_camera_infos(), Message::GotCameraInfo)
             },
             Message::GotCameraInfo(camera_infos) => {
@@ -209,38 +197,6 @@ impl CamViewer {
 
                 Task::none()
             },
-            // Message::CamerasConnected(video_infos) => {
-            //     //update self
-            //     for mut_video_info in self.video_infos.iter_mut() {
-            //         //find returned value
-            //         if let Some(video_info) = video_infos.iter().find(|vi| vi.serial_no==mut_video_info.serial_no) {
-            //             mut_video_info.ip = video_info.ip.clone();
-            //             mut_video_info.url = video_info.url.clone();
-            //             mut_video_info.title = video_info.title.clone();
-            //             mut_video_info.video = video_info.video.clone();
-            //             // let x = &*mut_video_info.video;
-            //             // let x = x.unwrap();
-            //             // x.
-            //         } else {
-
-            //         }
-            //         //get text for empty slot
-            //         if mut_video_info.title.is_empty() {
-            //             mut_video_info.empty_slot_text = format!("No video for cam: {}\nNot found on network for {}",
-            //                 mut_video_info.serial_no,
-            //                 mut_video_info.last_frame_instant.elapsed().hhmmss(),
-            //             );
-            //         } else {
-            //             mut_video_info.empty_slot_text = format!("No video for cam: {}\n{} at {} not seen for {}",
-            //                 mut_video_info.serial_no,
-            //                 mut_video_info.title,
-            //                 mut_video_info.ip,
-            //                 mut_video_info.last_frame_instant.elapsed().hhmmss()
-            //             );
-            //         }
-            //     }
-            //     Task::none()
-            // },
             Message::OnNewFrame(now, serial_no) => {
                 if let Some(mut_video_info) = self.get_mut_video_info_from_serial_no(&serial_no) {
                     mut_video_info.last_frame_instant = now;
@@ -265,11 +221,6 @@ impl CamViewer {
         for video_info in &self.video_infos {
             let video_deref_arc = &*video_info.video;
             if let Some(video) = video_deref_arc {
-                // println!("New player added {}", video_info.title);
-                // let player = lazy(self.version, |_| { VideoPlayer::new(video)
-                //     .on_new_frame(Message::OnNewFrame(Instant::now(), video_info.serial_no.clone()))
-                //     .on_error(|e| Message::OnCamError(video_info.serial_no.clone(), e.to_string()))
-                // });
                 let player = VideoPlayer::new(video)
                     .on_new_frame(Message::OnNewFrame(Instant::now(), video_info.serial_no.clone()))
                     .on_error(|e| Message::OnCamError(video_info.serial_no.clone(), e.to_string()));
@@ -291,37 +242,6 @@ impl CamViewer {
                 );
             }
         }
-
-        // let mut player_conts: Vec<_> = Vec::new();
-        // for video_info in &self.video_infos {
-        //     let player_cont = lazy(self.version, |_| {
-        //         let video_deref_arc = &*video_info.video;
-
-        //         if let Some(video) = video_deref_arc {
-        //             let player: VideoPlayer<'_, Message> = VideoPlayer::new(video)
-        //                 .on_new_frame(Message::OnNewFrame(Instant::now(), video_info.serial_no.clone()))
-        //                 .on_error(|e| Message::OnCamError(video_info.serial_no.clone(), e.to_string()));
-        //             let player = player;
-        //             container(player)
-        //                     .width(Length::Fill)
-        //                     .height(Length::Fill)
-        //                     .center_x(Length::Fill)
-        //                     .center_y(Length::Fill)
-        //         } else {
-        //             //space filler
-        //             let empty_slot_text = video_info.empty_slot_text.to_string();
-        //             container(text(empty_slot_text))
-        //                 .width(Length::Fill)
-        //                 .height(Length::Fill)
-        //                 .center_x(Length::Fill)
-        //                 .center_y(Length::Fill)
-        //         }
-        //     });
-
-        //     player_conts.push(player_cont);
-        // }
-
-
         
         let num_cols = 2;
 
@@ -373,6 +293,7 @@ async fn get_camera_infos() -> Vec<CameraInfo> {
         // match rt.block_on(get_camera_info(&ip)) {
         match get_camera_info(&ip).await {
             Ok(camera_info) => {
+                info!("camera_info: {:?}", camera_info);
                 camera_infos.push(camera_info);
             },
             Err(e) => {
@@ -407,61 +328,3 @@ async fn connect_camera(video_info: VideoInfo) -> VideoInfo {
         }
     }
 }
-
-// async fn get_video_streams(cam_checks: Vec<CamCheck>) -> Vec<VideoInfo> {
-//     let mut video_infos:Vec<VideoInfo> = Vec::new();
-//     //add any new
-//     let camera_ips = scan_subnet();
-//     info!("Found {} RTSP camera(s) on port 554:", camera_ips.len());
-    
-//     // let rt = Runtime::new().unwrap();
-//     for ip in camera_ips {
-//         // match rt.block_on(get_camera_info(&ip)) {
-//         match get_camera_info(&ip).await {
-//             Ok(camera_info) => {
-//                 // if serial_nos.iter().any(|c| c.serial_no==camera_info.serial_no) {
-//                 if let Some(cam_check) = cam_checks.iter().find(|cc| cc.serial_no==camera_info.serial_no) {
-//                     if !cam_check.has_video {
-//                         if let Ok(_) = sync_camera_time(&ip).await {
-//                             info!("Time on camera {} ({}) synced with computer", ip, camera_info.title);
-//                         }
-//                         let ip = ip.to_string();
-//                         let url = format!("rtsp://{}:554/user={}_password={}_channel=1_stream=0a&protocol=unicast.sdp?real_stream&protocols=tcp",
-//                             ip,
-//                             camera::USER,
-//                             camera::PASSWORD,
-//                         );
-//                         let title = camera_info.title;
-//                         //connect to video here, but this should be done only if not already connected.
-//                         info!("Connecting to {}", url);
-//                         match Video::new(&Url::parse(&url).unwrap()) {
-//                             Ok(mut video) => {
-//                                 video.set_volume(0.0);
-//                                 //video = Some(video);
-//                                 video_infos.push(VideoInfo { 
-//                                     serial_no: cam_check.serial_no.to_string(),
-//                                     ip: ip,
-//                                     url: url,
-//                                     title: title,
-//                                     last_frame_instant: Instant::now(),
-//                                     video: Some(video).into(),
-//                                     empty_slot_text: String::new(),
-//                                 });
-//                             },
-//                             Err(e) => {
-//                                 error!("Could not connect to {}\nError: {}", url, e);
-//                             }
-//                         }
-//                     }
-//                 } else {
-//                     error!("Found camera with serial_no = '{}', but this has not been explicitly defined as a camera.", camera_info.serial_no);
-//                 }
-//             },
-//             Err(e) => {
-//                 error!("Could not get camera info for {ip}: {e}")
-//             }
-//         }
-//     }
-
-//     video_infos
-// }
