@@ -1,20 +1,21 @@
+use std::ops::Deref;
+use std::sync::Arc;
+
 use hhmmss::Hhmmss;
 use iced::time::{self, Duration, Instant, seconds};
-use iced::widget::{Container, Space, column, container, row, text};
-use iced::window;
+use iced::widget::{Container, Lazy, Space, column, container, lazy, row, text};
+use iced::{Renderer, Theme, window};
 use iced::{Element, Length, Subscription, Task};
 use iced_video_player::{Video, VideoPlayer};
 use log::*;
 use tokio::runtime::Runtime;
 use url::Url;
 
-use crate::camera::get_camera_info;
+use crate::camera::{CameraInfo, get_camera_info, sync_camera_time};
 use crate::network::scan_subnet;
 
 mod camera;
 mod network;
-
-// const RTSP_URL: &str = "rtsp://192.168.1.34:554/user=admin_password=zprqvjbtwa2657!!EYVB_channel=1_stream=0a&protocol=unicast.sdp?real_stream";
 
 fn main() -> iced::Result {
     helper_lib::setup_logger(LevelFilter::Debug, None, "cam_viewer_rs", "cosmic_text,html5ever,iced,naga,sctk,tracing,wgpu_core,wgpu_hal,winit");
@@ -25,14 +26,29 @@ fn main() -> iced::Result {
         .run()
 }
 
+#[derive(Clone, Debug)]
 struct VideoInfo {
     serial_no: String,
     ip: String,
     url: String,
     title: String,
     last_frame_instant: Instant,
-    video: Option<Video>,
+    video: Arc<Option<Video>>,
     empty_slot_text: String,
+}
+
+impl Default for VideoInfo {
+    fn default() -> Self {
+        Self {
+            serial_no: String::new(),
+            ip: String::new(),
+            url: String::new(),
+            title: String::new(),
+            last_frame_instant: Instant::now(),
+            video: None.into(),
+            empty_slot_text: String::new(),
+        }
+    }
 }
 
 struct CamViewer {
@@ -40,11 +56,20 @@ struct CamViewer {
     last_redraw_requested: Instant,
 }
 
+struct CamCheck {
+    serial_no: String,
+    has_video: bool,
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     Tick(()),
     OnNewFrame(Instant, String),
+    OnCamError(String, String),
     RedrawRequested(Instant),
+    GotCameraInfo(Vec<CameraInfo>),
+    CameraConnected(VideoInfo),
+    // CamerasConnected(Vec<VideoInfo>),
 }
 
 impl Default for CamViewer {
@@ -59,7 +84,7 @@ impl Default for CamViewer {
                 url: String::new(),
                 title: String::new(),
                 last_frame_instant: Instant::now(),
-                video: None,
+                video: None.into(),
                 empty_slot_text: String::from("Starting up..."),
             },
             // cam 2, driveway
@@ -69,17 +94,17 @@ impl Default for CamViewer {
                 url: String::new(),
                 title: String::new(),
                 last_frame_instant: Instant::now(),
-                video: None,
+                video: None.into(),
                 empty_slot_text: String::from("Starting up..."),
             },
             // cam 3, back
             VideoInfo {
-                serial_no: "Serial No TBC".to_string(),
+                serial_no: "7f03583068bf0695".to_string(),
                 ip: String::new(),
                 url: String::new(),
                 title: String::new(),
                 last_frame_instant: Instant::now(),
-                video: None,
+                video: None.into(),
                 empty_slot_text: String::from("Starting up..."),
             },
             // cam 4, back high
@@ -89,7 +114,7 @@ impl Default for CamViewer {
                 url: String::new(),
                 title: String::new(),
                 last_frame_instant: Instant::now(),
-                video: None,
+                video: None.into(),
                 empty_slot_text: String::from("Starting up..."),
             },
         ];
@@ -113,63 +138,60 @@ impl CamViewer {
         )
     }
 
-    fn update(&mut self, message: Message) {
+    fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick(_) => {
                 //ignore tick if off screen
                 if self.last_redraw_requested.elapsed() > Duration::from_secs(1) {
                     debug!("Window is off-screen, so do not process tick.");
-                    return;
+                    return Task::none();
                 }
                 //remove any disconnected
                 for mut_video_info in self.video_infos.iter_mut() {
                     if mut_video_info.video.is_some() && mut_video_info.last_frame_instant.elapsed() > Duration::from_secs(5) {
                         warn!("{} ({}) at {} has not had a frame update for at least 5 seconds. Disconnecting.", mut_video_info.title, mut_video_info.serial_no, mut_video_info.ip);
-                        mut_video_info.video = None;
+                        mut_video_info.video = None.into();
                     }
                 }
                 //check for cameras
-                //add any new
-                let camera_ips = scan_subnet();
-                info!("Found {} RTSP camera(s) on port 554:", camera_ips.len());
-                
-                let rt = Runtime::new().unwrap();
-                for ip in camera_ips {
-                    match rt.block_on(get_camera_info(&ip)) {
-                        Ok(camera_info) => {
-                            if let Some(mut_video_info) = self.get_mut_video_info_from_serial_no(&camera_info.serial_no) {
-                                if mut_video_info.video.is_none() {
-                                    mut_video_info.ip = ip.to_string();
-                                    mut_video_info.url = format!("rtsp://{}:554/user={}_password={}_channel=1_stream=0a&protocol=unicast.sdp?real_stream&protocols=tcp",
-                                        ip,
-                                        camera::USER,
-                                        camera::PASSWORD,
-                                    );
-                                    mut_video_info.title = camera_info.title;
-                                    //connect to video here, but this should be done only if not already connected.
-                                    info!("Connecting to {}", mut_video_info.url);
-                                    match Video::new(&Url::parse(&mut_video_info.url).unwrap()) {
-                                        Ok(mut video) => {
-                                            video.set_volume(0.0);
-                                            mut_video_info.video = Some(video);
-                                        },
-                                        Err(e) => {
-                                            error!("Could not connect to {}\nError: {}", mut_video_info.url, e);
-                                        }
-                                    }
-                                }
-                            } else {
-                                error!("Found camera with serial_no = '{}', but this has not been explicitly defined as a camera.", camera_info.serial_no);
-                            }
-                        },
-                        Err(e) => {
-                            error!("Could get camera info for {ip}: {e}")
+                let serial_nos: Vec<_> = self.video_infos.iter().map(|vi| 
+                        CamCheck { serial_no: vi.serial_no.to_string(), has_video: vi.video.is_some() }
+                    ).collect();
+                // Task::perform(get_video_streams(serial_nos), Message::CamerasConnected)
+                Task::perform(get_camera_infos(), Message::GotCameraInfo)
+            },
+            Message::GotCameraInfo(camera_infos) => {
+                let mut tasks = Vec::new();
+                for mut_video_info in self.video_infos.iter_mut() {
+                    if mut_video_info.video.is_none() {
+                        //find returned value
+                        if let Some(camera_info) = camera_infos.iter().find(|ci| ci.serial_no==mut_video_info.serial_no) {
+                            let url = format!("rtsp://{}:554/user={}_password={}_channel=1_stream=0a&protocol=unicast.sdp?real_stream&protocols=tcp",
+                                camera_info.ip,
+                                camera::USER,
+                                camera::PASSWORD,
+                            );
+                            mut_video_info.url = url;
+                            mut_video_info.ip = camera_info.ip.to_string();
+                            mut_video_info.title = camera_info.title.to_string();
+
+                            //now get video, Task per camera for parallel connection
+                            tasks.push(Task::perform(connect_camera(mut_video_info.clone()), Message::CameraConnected));
+                            
+                        } else {
+                            error!("Found camera with serial_no = '{}', but this has not been explicitly defined as a camera.", mut_video_info.serial_no);
                         }
                     }
                 }
+                Task::batch(tasks)
+            },
+            Message::CameraConnected(video_info) => {
+                //link returned video to self
+                if let Some(mut_video_info) = self.get_mut_video_info_from_serial_no(&video_info.serial_no) {
+                    if video_info.video.is_some() {
+                        mut_video_info.video = video_info.video.clone();
+                    }
 
-                //get text for empty slot
-                for mut_video_info in self.video_infos.iter_mut() {
                     if mut_video_info.title.is_empty() {
                         mut_video_info.empty_slot_text = format!("No video for cam: {}\nNot found on network for {}",
                             mut_video_info.serial_no,
@@ -185,15 +207,55 @@ impl CamViewer {
                     }
                 }
 
-
+                Task::none()
             },
+            // Message::CamerasConnected(video_infos) => {
+            //     //update self
+            //     for mut_video_info in self.video_infos.iter_mut() {
+            //         //find returned value
+            //         if let Some(video_info) = video_infos.iter().find(|vi| vi.serial_no==mut_video_info.serial_no) {
+            //             mut_video_info.ip = video_info.ip.clone();
+            //             mut_video_info.url = video_info.url.clone();
+            //             mut_video_info.title = video_info.title.clone();
+            //             mut_video_info.video = video_info.video.clone();
+            //             // let x = &*mut_video_info.video;
+            //             // let x = x.unwrap();
+            //             // x.
+            //         } else {
+
+            //         }
+            //         //get text for empty slot
+            //         if mut_video_info.title.is_empty() {
+            //             mut_video_info.empty_slot_text = format!("No video for cam: {}\nNot found on network for {}",
+            //                 mut_video_info.serial_no,
+            //                 mut_video_info.last_frame_instant.elapsed().hhmmss(),
+            //             );
+            //         } else {
+            //             mut_video_info.empty_slot_text = format!("No video for cam: {}\n{} at {} not seen for {}",
+            //                 mut_video_info.serial_no,
+            //                 mut_video_info.title,
+            //                 mut_video_info.ip,
+            //                 mut_video_info.last_frame_instant.elapsed().hhmmss()
+            //             );
+            //         }
+            //     }
+            //     Task::none()
+            // },
             Message::OnNewFrame(now, serial_no) => {
                 if let Some(mut_video_info) = self.get_mut_video_info_from_serial_no(&serial_no) {
                     mut_video_info.last_frame_instant = now;
-                }
+                };
+                Task::none()
+            },
+             Message::OnCamError(serial_no, e) => {
+                if let Some(mut_video_info) = self.get_mut_video_info_from_serial_no(&serial_no) {
+                    error!("Error from stream on cam {} ({}, {}) Error: {}", mut_video_info.ip, mut_video_info.title, serial_no, e);
+                };
+                Task::none()
             },
             Message::RedrawRequested(now) => {
                 self.last_redraw_requested = now;
+                Task::none()
             },
         }
     }
@@ -201,10 +263,16 @@ impl CamViewer {
     fn view(&self) -> Element<'_, Message> {
         let mut player_conts: Vec<Container<Message>> = Vec::new();
         for video_info in &self.video_infos {
-            if let Some(video) = &video_info.video {
-                //let video = video.
-                let player: VideoPlayer<'_, Message> = VideoPlayer::new(video)
-                    .on_new_frame(Message::OnNewFrame(Instant::now(), video_info.serial_no.clone()));
+            let video_deref_arc = &*video_info.video;
+            if let Some(video) = video_deref_arc {
+                // println!("New player added {}", video_info.title);
+                // let player = lazy(self.version, |_| { VideoPlayer::new(video)
+                //     .on_new_frame(Message::OnNewFrame(Instant::now(), video_info.serial_no.clone()))
+                //     .on_error(|e| Message::OnCamError(video_info.serial_no.clone(), e.to_string()))
+                // });
+                let player = VideoPlayer::new(video)
+                    .on_new_frame(Message::OnNewFrame(Instant::now(), video_info.serial_no.clone()))
+                    .on_error(|e| Message::OnCamError(video_info.serial_no.clone(), e.to_string()));
                 let player_cont: Container<Message> =             container(player)
                         .width(Length::Fill)
                         .height(Length::Fill)
@@ -224,6 +292,37 @@ impl CamViewer {
             }
         }
 
+        // let mut player_conts: Vec<_> = Vec::new();
+        // for video_info in &self.video_infos {
+        //     let player_cont = lazy(self.version, |_| {
+        //         let video_deref_arc = &*video_info.video;
+
+        //         if let Some(video) = video_deref_arc {
+        //             let player: VideoPlayer<'_, Message> = VideoPlayer::new(video)
+        //                 .on_new_frame(Message::OnNewFrame(Instant::now(), video_info.serial_no.clone()))
+        //                 .on_error(|e| Message::OnCamError(video_info.serial_no.clone(), e.to_string()));
+        //             let player = player;
+        //             container(player)
+        //                     .width(Length::Fill)
+        //                     .height(Length::Fill)
+        //                     .center_x(Length::Fill)
+        //                     .center_y(Length::Fill)
+        //         } else {
+        //             //space filler
+        //             let empty_slot_text = video_info.empty_slot_text.to_string();
+        //             container(text(empty_slot_text))
+        //                 .width(Length::Fill)
+        //                 .height(Length::Fill)
+        //                 .center_x(Length::Fill)
+        //                 .center_y(Length::Fill)
+        //         }
+        //     });
+
+        //     player_conts.push(player_cont);
+        // }
+
+
+        
         let num_cols = 2;
 
         // Break the vector into chunks of length x (columns)
@@ -263,3 +362,106 @@ impl CamViewer {
 
 }
 
+async fn get_camera_infos() -> Vec<CameraInfo> {
+    let mut camera_infos:Vec<CameraInfo> = Vec::new();
+    //add any new
+    let camera_ips = scan_subnet();
+    info!("Found {} RTSP camera(s) on port 554:", camera_ips.len());
+    
+    // let rt = Runtime::new().unwrap();
+    for ip in camera_ips {
+        // match rt.block_on(get_camera_info(&ip)) {
+        match get_camera_info(&ip).await {
+            Ok(camera_info) => {
+                camera_infos.push(camera_info);
+            },
+            Err(e) => {
+                error!("Could not get camera info for {ip}: {e}")
+            }
+        }
+    }
+
+    camera_infos
+}
+
+async fn connect_camera(video_info: VideoInfo) -> VideoInfo {
+    if let Ok(_) = sync_camera_time(&video_info.ip).await {
+        info!("Time on camera {} ({}) synced with computer", video_info.ip, video_info.title);
+    }
+    info!("Connecting to {}", video_info.url);
+    match Video::new(&Url::parse(&video_info.url).unwrap()) {
+        Ok(mut video) => {
+            video.set_volume(0.0);
+            VideoInfo { 
+                serial_no: video_info.serial_no.to_string(),
+                video: Some(video).into(),
+                ..Default::default()
+            }
+        },
+        Err(e) => {
+            error!("Could not connect to {}\nError: {}", video_info.url, e);
+            VideoInfo { 
+                serial_no: video_info.serial_no.to_string(),
+                ..Default::default()
+            }
+        }
+    }
+}
+
+// async fn get_video_streams(cam_checks: Vec<CamCheck>) -> Vec<VideoInfo> {
+//     let mut video_infos:Vec<VideoInfo> = Vec::new();
+//     //add any new
+//     let camera_ips = scan_subnet();
+//     info!("Found {} RTSP camera(s) on port 554:", camera_ips.len());
+    
+//     // let rt = Runtime::new().unwrap();
+//     for ip in camera_ips {
+//         // match rt.block_on(get_camera_info(&ip)) {
+//         match get_camera_info(&ip).await {
+//             Ok(camera_info) => {
+//                 // if serial_nos.iter().any(|c| c.serial_no==camera_info.serial_no) {
+//                 if let Some(cam_check) = cam_checks.iter().find(|cc| cc.serial_no==camera_info.serial_no) {
+//                     if !cam_check.has_video {
+//                         if let Ok(_) = sync_camera_time(&ip).await {
+//                             info!("Time on camera {} ({}) synced with computer", ip, camera_info.title);
+//                         }
+//                         let ip = ip.to_string();
+//                         let url = format!("rtsp://{}:554/user={}_password={}_channel=1_stream=0a&protocol=unicast.sdp?real_stream&protocols=tcp",
+//                             ip,
+//                             camera::USER,
+//                             camera::PASSWORD,
+//                         );
+//                         let title = camera_info.title;
+//                         //connect to video here, but this should be done only if not already connected.
+//                         info!("Connecting to {}", url);
+//                         match Video::new(&Url::parse(&url).unwrap()) {
+//                             Ok(mut video) => {
+//                                 video.set_volume(0.0);
+//                                 //video = Some(video);
+//                                 video_infos.push(VideoInfo { 
+//                                     serial_no: cam_check.serial_no.to_string(),
+//                                     ip: ip,
+//                                     url: url,
+//                                     title: title,
+//                                     last_frame_instant: Instant::now(),
+//                                     video: Some(video).into(),
+//                                     empty_slot_text: String::new(),
+//                                 });
+//                             },
+//                             Err(e) => {
+//                                 error!("Could not connect to {}\nError: {}", url, e);
+//                             }
+//                         }
+//                     }
+//                 } else {
+//                     error!("Found camera with serial_no = '{}', but this has not been explicitly defined as a camera.", camera_info.serial_no);
+//                 }
+//             },
+//             Err(e) => {
+//                 error!("Could not get camera info for {ip}: {e}")
+//             }
+//         }
+//     }
+
+//     video_infos
+// }
