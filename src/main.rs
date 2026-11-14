@@ -109,6 +109,16 @@ impl Default for CamViewer {
                 video: None.into(),
                 empty_slot_text: String::from("Starting up..."),
             },
+            // cam 5, driveway 2
+            VideoInfo {
+                serial_no: "58aa81c77657c7b2".to_string(),
+                ip: String::new(),
+                url: String::new(),
+                title: String::new(),
+                last_frame_instant: Instant::now(),
+                video: None.into(),
+                empty_slot_text: String::from("Starting up..."),
+            },
         ];
 
         Self {
