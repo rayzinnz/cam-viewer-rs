@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use hhmmss::Hhmmss;
 use iced::time::{self, Duration, Instant, seconds};
-use iced::widget::{Container, column, container, row, text};
-use iced::window;
+use iced::widget::{Container, Stack, column, container, row, stack, text};
+use iced::{Font, Renderer, Theme, color, font, window};
 use iced::{Element, Length, Subscription, Task};
 use iced_video_player::{Video, VideoPlayer};
 use log::*;
@@ -227,7 +227,7 @@ impl CamViewer {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let mut player_conts: Vec<Container<Message>> = Vec::new();
+        let mut player_conts: Vec<(String, Container<Message>)> = Vec::new();
         for video_info in &self.video_infos {
             let video_deref_arc = &*video_info.video;
             if let Some(video) = video_deref_arc {
@@ -240,16 +240,17 @@ impl CamViewer {
                         .center_x(Length::Fill)
                         .center_y(Length::Fill)
                         .into();
-                player_conts.push(player_cont);
+                player_conts.push((format!("{}\n{}\n{}", video_info.serial_no, video_info.title, video_info.ip), player_cont));
             } else {
                 //space filler
-                player_conts.push(container(text(&video_info.empty_slot_text))
+                player_conts.push((format!("{}", video_info.serial_no),
+                    container(text(&video_info.empty_slot_text))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .center_x(Length::Fill)
                     .center_y(Length::Fill)
                     .into()
-                );
+                ));
             }
         }
         
@@ -260,9 +261,17 @@ impl CamViewer {
             .into_iter()
             .fold(Vec::new(), |mut acc: Vec<Vec<Element<'_, Message>>>, item| {
                 if acc.last().map_or(true, |row| row.len() == num_cols) {
-                    acc.push(vec![item.into()]);
+                    acc.push(vec![stack![
+                            item.1,
+                            bordered_text(item.0),
+                        ].into()]);
                 } else {
-                    acc.last_mut().unwrap().push(item.into());
+                    acc.last_mut().unwrap().push(
+                        stack![
+                            item.1,
+                            bordered_text(item.0),
+                        ].into()
+                    );
                 }
                 acc
             });
@@ -290,6 +299,18 @@ impl CamViewer {
         self.video_infos.iter_mut().find(|vi| vi.serial_no==serial_no)
     }
 
+}
+
+fn bordered_text(string: String) -> Stack<'static, Message, Theme, Renderer> {
+    let bold_font = Font {weight: font::Weight::Semibold, ..Font::DEFAULT};
+    let font_sep = 1.0f32;
+    stack![
+        container(text(string.clone()).font(bold_font).color(color!(0x000000))).padding([0.0,0.0]),
+        container(text(string.clone()).font(bold_font).color(color!(0x000000))).padding([0.0,font_sep*2.0]),
+        container(text(string.clone()).font(bold_font).color(color!(0x000000))).padding([font_sep*2.0,0.0]),
+        container(text(string.clone()).font(bold_font).color(color!(0x000000))).padding([font_sep*2.0,font_sep*2.0]),
+        container(text(string).font(bold_font).color(color!(0xffffff))).padding([font_sep,font_sep]),
+    ]
 }
 
 async fn get_camera_infos() -> Vec<CameraInfo> {
